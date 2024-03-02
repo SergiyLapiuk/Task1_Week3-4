@@ -14,15 +14,10 @@ from torchvision.transforms import ToTensor, Resize
 from PIL import Image
 from torchvision.transforms import Lambda
 from PIL import ImageFile
+from torch.nn.functional import cosine_similarity
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-THRESHOLD = 55
-COLOR_CHANNEL_COUNT = 3
-CSV_ROW_LENGTH = 22
-ROOT_RANK = 0
-TRAIN_DATA = "train_task1.json"
-TEST_DATA = "test_task1.json"
-VALIDATION_DATA = "val_task1.json"
 
 class SiameseDataset(Dataset):
     def __init__(self, image_pairs, images_folder, transform=None):
@@ -36,11 +31,10 @@ class SiameseDataset(Dataset):
     def __getitem__(self, index):
         task_id, label = self.image_pairs[index]
 
-        image1_path = os.path.join(self.images_folder, f"{task_id}_1.jpg") # Або .png, залежно від формату
+        image1_path = os.path.join(self.images_folder, f"{task_id}_1.jpg")
         image2_path = os.path.join(self.images_folder, f"{task_id}_2.jpg")
 
 
-        # Завантаження локальних зображень
         image1 = self.load_image(image1_path)
         image2 = self.load_image(image2_path)
 
@@ -51,72 +45,61 @@ class SiameseDataset(Dataset):
         return image1, image2, label
 
     def load_image(self, image_path):
-        # Стандартне зображення як заповнювач
         placeholder_image_path = 'E:\\images_rooms_val\\330201107#330201147_1.jpg'
 
         try:
             image = Image.open(image_path)
-            image.load()  # Спробуйте завантажити зображення
+            image.load()
             return image
         except OSError as e:
             print(f"Помилка при завантаженні зображення {image_path}: {e}. Використання замінного зображення.")
-            # Використовуємо замінне зображення
             placeholder_image = Image.open(placeholder_image_path)
             placeholder_image.load()
             return placeholder_image
 
-# Load test data from test_task1.json
-test_data_path = "val_task1.json"
-with open(test_data_path, "r") as file:
-    test_data = json.load(file)["data"]["results"]
-    task_ids = [item["taskId"] for item in test_data]
+class SiameseDataLoader:
+    def __init__(self, train_json_path, test_json_path, images_folder_train, images_folder_test, batch_size=8, transform=None):
+        self.train_json_path = train_json_path
+        self.test_json_path = test_json_path
+        self.images_folder_train = images_folder_train
+        self.images_folder_test = images_folder_test
+        self.batch_size = batch_size
+        self.transform = transform
 
-train_data_path = "train_task1.json"
-with open(train_data_path, "r") as file:
-    train_data = json.load(file)["data"]["results"]
+    def create_datasets(self):
+        train_data, train_task_ids = self.load_data_from_json(self.train_json_path)
+        test_data, test_task_ids = self.load_data_from_json(self.test_json_path)
 
-# Create list of image pairs and labels
-image_pairs = []
-y_true = []  # List to store true class labels
-for entry in test_data:
-    task_id = entry['taskId']
-    label = 0
-    image_pairs.append((task_id, label))
-    y_true.append(label)  # Append true class label
+        image_pairs_train = [(entry['taskId'], int(entry["answers"][0]["answer"][0]["id"])) for entry in train_data]
+        #image_pairs_train = [(entry['taskId'], int(entry["answers"][0]["answer"][0]["id"])) for entry in
+                             #train_data[:320]]
+        image_pairs_test = [(entry['taskId'], 0) for entry in test_data]
 
-# Create list of image pairs and labels
-image_pairs_train = []
-for entry in train_data:
-    task_id = entry['taskId']
-    label = int(entry["answers"][0]["answer"][0]["id"])
-    image_pairs_train.append((task_id, label))
+        train_dataset = SiameseDataset(image_pairs_train, self.images_folder_train, transform=self.transform)
+        test_dataset = SiameseDataset(image_pairs_test, self.images_folder_test, transform=self.transform)
 
+        return train_dataset, test_dataset, train_task_ids, test_task_ids
 
-# Define transformations
-#transform = Resize((224, 224))  # Resize images to fit into ResNet50 input size
-#transform = transforms.Compose([transform, ToTensor()])  # Convert PIL images to tensors
+    def create_data_loaders(self):
+        train_dataset, test_dataset, _, test_task_ids = self.create_datasets()
 
-# Визначення трансформацій
-transform = transforms.Compose([
-    Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-    Resize((224, 224)),  # Змінити розмір зображень до вхідного розміру ResNet50
-    ToTensor()  # Конвертувати зображення PIL в тензори
-])
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
 
-# Create dataset and DataLoader
-batch_size = 8
-path_folder_test = 'E:\\images_rooms_val'
-test_dataset = SiameseDataset(image_pairs, path_folder_test, transform=transform)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+        return train_loader, test_loader, test_task_ids
 
-path_folder_train = 'E:\\images_rooms_train'
-train_dataset = SiameseDataset(image_pairs_train, path_folder_train, transform=transform)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    def load_data_from_json(self, json_path):
+        with open(json_path, "r") as file:
+            data = json.load(file)["data"]["results"]
+        task_ids = [item["taskId"] for item in data]
+        return data, task_ids
 
-# Define Siamese network architecture
 class SiameseNetwork(nn.Module):
     def __init__(self):
         super(SiameseNetwork, self).__init__()
+        #self.backbone = models.vgg16(pretrained=True)
+        #self.embedding_size = self.backbone.classifier[-1].in_features
+        #self.backbone.classifier = nn.Identity()
         self.backbone = models.resnet50(pretrained=True)
         self.embedding_size = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity()
@@ -126,7 +109,6 @@ class SiameseNetwork(nn.Module):
         embedding2 = self.backbone(x2)
         return embedding1, embedding2
 
-# Define contrastive loss
 class ContrastiveLoss(nn.Module):
     def __init__(self, margin):
         super(ContrastiveLoss, self).__init__()
@@ -138,90 +120,103 @@ class ContrastiveLoss(nn.Module):
                                        target * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
         return loss_contrastive
 
-# Instantiate Siamese network, criterion, and optimizer
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = SiameseNetwork().to(device)
-criterion = ContrastiveLoss(margin=1.0)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+class SiameseNetworkTrainer:
+    def __init__(self, network, train_loader, test_loader, margin=1.0, lr=0.0001, threshold=70):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = network.to(self.device)
+        self.train_loader = train_loader
+        self.test_loader = test_loader
+        self.criterion = ContrastiveLoss(margin).to(self.device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.threshold = threshold / 100
 
-# Training loop
-num_epochs = 5
-for epoch in range(num_epochs):
-    for batch_idx, (images1, images2, labels) in enumerate(train_loader):
-        images1 = images1.to(device)
-        images2 = images2.to(device)
-        labels = labels.to(device)
+    def train(self, num_epochs):
+        for epoch in range(num_epochs):
+            for batch_idx, (images1, images2, labels) in enumerate(self.train_loader):
+                images1, images2, labels = images1.to(self.device), images2.to(self.device), labels.to(self.device)
 
-        optimizer.zero_grad()
-        embeddings1, embeddings2 = model(images1, images2)
-        loss = criterion(embeddings1, embeddings2, labels.float())
-        loss.backward()
-        optimizer.step()
+                self.optimizer.zero_grad()
+                embeddings1, embeddings2 = self.model(images1, images2)
+                loss = self.criterion(embeddings1, embeddings2, labels.float())
+                loss.backward()
+                self.optimizer.step()
 
-        # Print training progress
-        print(f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                print(f"Epoch [{epoch+1}/{num_epochs}], Batch [{batch_idx+1}/{len(self.train_loader)}], Loss: {loss.item():.4f}")
 
-y_pred = []
-# Initialize lists to store true positives, false positives, and false negatives
-true_positives = []
-false_positives = []
-false_negatives = []
-result = []
+    def test(self):
+        true_positives = []
+        false_positives = []
+        false_negatives = []
+        result = []
 
+        with torch.no_grad():
+            for image1, image2, label in self.test_loader:
+                image1, image2, label = image1.to(self.device), image2.to(self.device), label.to(self.device)
 
-# Iterate over test data
-# Iterate over test data
+                output1, output2 = self.model(image1, image2)
+                euclidean_distance = nn.functional.pairwise_distance(output1, output2)
+                predictions = (euclidean_distance < self.threshold).float()
 
-for i, (image1, image2, label) in enumerate(test_loader):
-    # Move tensors to the correct device
-    image1 = image1.to(device)
-    image2 = image2.to(device)
-    #label = label.to(device)
+                labels_np = label.cpu().numpy()
+                predictions_np = predictions.cpu().numpy()
 
-    # Forward pass
-    output1, output2 = model(image1, image2)
-
-    # Compute Euclidean distance
-    euclidean_distance = nn.functional.pairwise_distance(output1, output2)
-
-    # Compute predictions: if distance < threshold, images are similar (label 1), else they are dissimilar (label 0)
-    predictions = (euclidean_distance < THRESHOLD / 100).float()
-
-    # Append the predictions to y_pred
-    y_pred.extend(predictions.cpu().numpy())  # Extend the list with predictions
-
-    # Convert labels and predictions to numpy arrays
-    #labels_np = label.cpu().numpy()
-    predictions_np = predictions.cpu().numpy()
-
-    # Calculate true positives, false positives, and false negatives
-    #for pred, lbl in zip(predictions_np, labels_np):
-    #    result.append(int(pred))
-    #   if pred == 1 and lbl == 1:
-    #        true_positives.append(pred)
-    #   elif pred == 1 and lbl == 0:
-    #        false_positives.append(pred)
-    #    elif pred == 0 and lbl == 1:
-    #        false_negatives.append(pred)
-    # Calculate true positives, false positives, and false negatives
-    for pred in predictions_np:
-        result.append(int(pred))
+                for pred, lbl in zip(predictions_np, labels_np):
+                    result.append(int(pred))
+                    if pred == 1 and lbl == 1:
+                        true_positives.append(pred)
+                    elif pred == 1 and lbl == 0:
+                        false_positives.append(pred)
+                    elif pred == 0 and lbl == 1:
+                        false_negatives.append(pred)
 
 
-with open('output_val', 'w') as csvfile:
-    csvwriter = csv.writer(csvfile)
-    csvwriter.writerow(['taskId', 'answer'])
-    for res, task_id in zip(result, task_ids):
-        csvwriter.writerow([task_id, res])
+        return true_positives, false_positives, false_negatives, result
+
+    def get_csv(self, task_ids, result):
+        with open('output_val2.csv', 'w', newline='') as csvfile:
+            csvwriter = csv.writer(csvfile, quoting=csv.QUOTE_NONE)
+            csvwriter.writerow(['taskId', 'answer'])
+            for res, task_id in zip(result, task_ids):
+                csvwriter.writerow([task_id, res])
 
 
-# Calculate precision, recall, and F1 score
-#precision = len(true_positives) / (len(true_positives) + len(false_positives))
-#recall = len(true_positives) / (len(true_positives) + len(false_negatives))
-#f1_score = 2 * precision * recall / (precision + recall)
+def main():
+    network = SiameseNetwork()
 
-#print(f"Precision: {precision}")
-#print(f"Recall: {recall}")
-#print(f"F1 Score: {f1_score}")
+    transform = transforms.Compose([
+        Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        Resize((224, 224)),
+        ToTensor()
+    ])
 
+    siamese_data_loader = SiameseDataLoader(
+        train_json_path='train_task1.json',
+        test_json_path='val_task1.json',
+        images_folder_train='E:\\images_rooms_train',
+        images_folder_test='E:\\images_rooms_val',
+        batch_size=8,
+        transform=transform
+    )
+
+    train_loader, test_loader, test_task_ids  = siamese_data_loader.create_data_loaders()
+
+    trainer = SiameseNetworkTrainer(network=network, train_loader=train_loader, test_loader=test_loader)
+
+    trainer.train(num_epochs=2)
+
+    true_positives, false_positives, false_negatives, result = trainer.test()
+
+    trainer.get_csv(test_task_ids, result)
+
+    #precision = len(true_positives) / (len(true_positives) + len(false_positives))
+    #recall = len(true_positives) / (len(true_positives) + len(false_negatives))
+    #f1_score = 2 * precision * recall / (precision + recall)
+
+    #print(f"Precision: {precision}")
+    #print(f"Recall: {recall}")
+    #print(f"F1 Score: {f1_score}")
+
+
+if __name__ == '__main__':
+    main()
 
